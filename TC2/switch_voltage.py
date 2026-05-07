@@ -125,55 +125,76 @@ def show():
             </style>
         """, unsafe_allow_html=True)
 
-        # ========== 联动筛选器 ==========
+        # ========== 获取所有可能的选项 ==========
         all_projects = sorted(df['Project Name'].dropna().unique().tolist())
         all_voltages = sorted(df['Voltage Condition'].dropna().unique().tolist())
 
-        if 'tc2_selected_projects' not in st.session_state:
-            st.session_state.tc2_selected_projects = all_projects
-        if 'tc2_selected_voltages' not in st.session_state:
-            st.session_state.tc2_selected_voltages = all_voltages
+        # ========== 安全地初始化 Session State 变量 ==========
+        if 'tc2_temp_projects' not in st.session_state:
+            st.session_state.tc2_temp_projects = all_projects.copy()
+        if 'tc2_temp_voltages' not in st.session_state:
+            st.session_state.tc2_temp_voltages = all_voltages.copy()
 
+        # ========== 联动筛选器 ==========
         col_filter1, col_filter2 = st.columns(2)
 
         with col_filter1:
-            if st.session_state.tc2_selected_voltages:
-                available_projects = df[df['Voltage Condition'].isin(st.session_state.tc2_selected_voltages)][
+            # 根据已选的电压条件，计算可用的项目选项
+            current_voltages = st.session_state.tc2_temp_voltages
+            if current_voltages:
+                available_projects = df[df['Voltage Condition'].isin(current_voltages)][
                     'Project Name'].dropna().unique().tolist()
             else:
                 available_projects = all_projects
             available_projects = sorted(available_projects)
 
+            # 获取当前选中的项目，并过滤掉无效值
+            current_projects = st.session_state.tc2_temp_projects
+            valid_projects = [p for p in current_projects if p in available_projects]
+            if valid_projects != current_projects:
+                st.session_state.tc2_temp_projects = valid_projects
+
             selected_projects = st.multiselect(
                 "Filter by Project Name",
                 options=available_projects,
-                default=[p for p in st.session_state.tc2_selected_projects if p in available_projects],
-                placeholder="Select projects..."
+                default=st.session_state.tc2_temp_projects,
+                placeholder="Select projects...",
+                key="tc2_project_multiselect"
             )
-            st.session_state.tc2_selected_projects = selected_projects
+            st.session_state.tc2_temp_projects = selected_projects
 
         with col_filter2:
-            if st.session_state.tc2_selected_projects:
-                available_voltages = df[df['Project Name'].isin(st.session_state.tc2_selected_projects)][
+            # 根据已选的项目，计算可用的电压选项
+            current_projects = st.session_state.tc2_temp_projects
+            if current_projects:
+                available_voltages = df[df['Project Name'].isin(current_projects)][
                     'Voltage Condition'].dropna().unique().tolist()
             else:
                 available_voltages = all_voltages
             available_voltages = sorted(available_voltages)
 
+            # 获取当前选中的电压，并过滤掉无效值
+            current_voltages = st.session_state.tc2_temp_voltages
+            valid_voltages = [v for v in current_voltages if v in available_voltages]
+            if valid_voltages != current_voltages:
+                st.session_state.tc2_temp_voltages = valid_voltages
+
             selected_voltages = st.multiselect(
                 "Filter by Voltage Condition",
                 options=available_voltages,
-                default=[v for v in st.session_state.tc2_selected_voltages if v in available_voltages],
-                placeholder="Select voltage conditions..."
+                default=st.session_state.tc2_temp_voltages,
+                placeholder="Select voltage conditions...",
+                key="tc2_voltage_multiselect"
             )
-            st.session_state.tc2_selected_voltages = selected_voltages
+            st.session_state.tc2_temp_voltages = selected_voltages
 
-        # 应用筛选
+        # ========== 应用筛选 ==========
         filtered_df = df.copy()
-        if st.session_state.tc2_selected_projects:
-            filtered_df = filtered_df[filtered_df['Project Name'].isin(st.session_state.tc2_selected_projects)]
-        if st.session_state.tc2_selected_voltages:
-            filtered_df = filtered_df[filtered_df['Voltage Condition'].isin(st.session_state.tc2_selected_voltages)]
+
+        if st.session_state.tc2_temp_projects:
+            filtered_df = filtered_df[filtered_df['Project Name'].isin(st.session_state.tc2_temp_projects)]
+        if st.session_state.tc2_temp_voltages:
+            filtered_df = filtered_df[filtered_df['Voltage Condition'].isin(st.session_state.tc2_temp_voltages)]
 
         if len(filtered_df) == 0:
             st.warning("No data available. Please adjust your filters.")
@@ -201,7 +222,7 @@ def show():
                 marker_color='#2E86AB',
                 opacity=0.6,
                 histnorm='probability density',
-                nbinsx=20,  # bin 从 30 改为 20
+                nbinsx=20,
                 legendgroup='Positive',
                 showlegend=True
             ))
@@ -238,7 +259,7 @@ def show():
                 marker_color='#A23B72',
                 opacity=0.6,
                 histnorm='probability density',
-                nbinsx=20,  # bin 从 30 改为 20
+                nbinsx=20,
                 legendgroup='Negative',
                 showlegend=True
             ))
@@ -340,6 +361,16 @@ def show():
 
         plot_df = pd.concat([positive_stats, negative_stats], ignore_index=True)
 
+        # ========== 检测筛选是否变化，如果变化则清空右侧选中状态 ==========
+        # 创建一个筛选状态的唯一标识
+        filter_key = f"{len(st.session_state.tc2_temp_projects)}_{len(st.session_state.tc2_temp_voltages)}"
+        if 'tc2_last_filter_key' not in st.session_state:
+            st.session_state.tc2_last_filter_key = filter_key
+        elif st.session_state.tc2_last_filter_key != filter_key:
+            # 筛选条件变化了，清空选中点
+            st.session_state.tc2_last_filter_key = filter_key
+            st.session_state.tc2_selected_points = []
+
         # ========== 左右布局 ==========
         left_col, right_col = st.columns([2, 1.5])
 
@@ -399,29 +430,17 @@ def show():
 
             all_indices = list(range(len(point_labels)))
 
-            if len(sorted_df) > 0:
-                max_freq_idx = sorted_df['Frequency'].idxmax()
-                default_indices = [i for i, idx in enumerate(sorted_df.index) if idx == max_freq_idx]
-            else:
-                default_indices = []
-
-            col_btn1, col_btn2 = st.columns(2)
-            with col_btn1:
-                if st.button("📌 Select All", key="tc2_select_all", use_container_width=True):
-                    st.session_state.tc2_selected_points = all_indices
-            with col_btn2:
-                if st.button("🗑 Clear All", key="tc2_clear_all", use_container_width=True):
-                    st.session_state.tc2_selected_points = []
-
+            # 初始化 session_state 中的选中值（默认为空列表）
             if 'tc2_selected_points' not in st.session_state:
-                st.session_state.tc2_selected_points = default_indices
+                st.session_state.tc2_selected_points = []
 
             selected_indices = st.multiselect(
                 "Select voltage points to display",
                 options=all_indices,
                 format_func=lambda i: point_labels[i],
                 default=st.session_state.tc2_selected_points,
-                placeholder="Select one or more voltage points..."
+                placeholder="Select one or more voltage points...",
+                key="tc2_point_multiselect"
             )
 
             st.session_state.tc2_selected_points = selected_indices
@@ -503,7 +522,7 @@ def show():
                     f"**{len(selected_indices)} voltage point(s) selected, {len(details_df) - len(selected_indices)} files shown**")
                 st.dataframe(details_df, width='stretch', height=500)
             else:
-                st.info("No voltage points selected. Use the buttons above or dropdown to select points.")
+                st.info("No voltage points selected. Select voltage points from the dropdown above to display file details.")
 
     except Exception as e:
         st.error(f"Error: {str(e)}")
