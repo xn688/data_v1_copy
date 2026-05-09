@@ -439,7 +439,10 @@ def show():
         st.markdown(f"""
         <div style="margin-top: 25px;">
             <div style="font-family: monospace; font-size: 15px; font-weight: 500; background-color: #e8eaed; padding: 6px 14px; border-radius: 20px; display: inline-block; color: #1a1a1a;">
-                📐 Acceptance: Vreset/Vset Overall Median ± <span style="font-size: 18px; font-weight: bold; color: #1a73e8; background-color: #ffffff; padding: 2px 8px; border-radius: 12px; margin: 0 2px;">{threshold_multiplier}</span> × MAD
+                📐 Pass/Fail Criteria: Vreset/Vset Overall Median ± <span style="font-size: 18px; font-weight: bold; color: #1a73e8; background-color: #ffffff; padding: 2px 8px; border-radius: 12px; margin: 0 2px;">{threshold_multiplier}</span> × MAD
+            </div>
+            <div style="font-family: monospace; font-size: 12px; color: #666; margin-top: 8px; margin-left: 8px;">
+                ℹ️ Median per condition calculated after excluding top/bottom 2% outliers
             </div>
             <div style="font-family: monospace; font-size: 14px; font-weight: 500; margin-top: 10px; margin-left: 8px; color: #1a1a1a;">
                 <span style='color: #2e7d32;'>●</span> Pass: per-condition median within range
