@@ -37,7 +37,7 @@ def run_script(script_path):
 tab1, tab2, tab3, tab4 = st.tabs(["TC1", "TC2", "TC3", "TC4"])
 
 with tab1:
-    run_script("TC1/TC1-v2.py")
+    run_script("TC1/TC1-v1.py")
 
 with tab2:
     run_script("TC2/TC2-main.py")
