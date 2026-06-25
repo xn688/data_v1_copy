@@ -1,14 +1,16 @@
+# TC2/switch_voltage.py
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 import numpy as np
 from scipy import stats
 import os
+import re
 
 
 # ========== 缓存：数据加载和处理 ==========
 @st.cache_data
-def load_processed_data(main_csv_path, summary_csv_path):
+def load_processed_data(main_csv_path, summary_csv_path, excel_path, sheet_name):
     """加载并处理原始数据，缓存结果"""
 
     # 读取主数据
@@ -58,6 +60,63 @@ def load_processed_data(main_csv_path, summary_csv_path):
     # 删除临时列
     df = df.drop(columns=['Match Key'])
 
+    # ========== 从 Excel 读取修改时间 ==========
+    sample_modified_map = {}
+    if os.path.exists(excel_path):
+        try:
+            excel_file = pd.ExcelFile(excel_path)
+            if sheet_name in excel_file.sheet_names:
+                excel_df = pd.read_excel(excel_path, sheet_name=sheet_name)
+
+                # 识别 Name 列和时间列
+                name_col = None
+                for col in ['Name', '名称', 'Sample', '样品名称', 'Sample Name']:
+                    if col in excel_df.columns:
+                        name_col = col
+                        break
+                if name_col is None:
+                    name_col = excel_df.columns[0]
+
+                # 识别 Raw修改时间 列
+                time_col = None
+                for col in ['Raw修改时间', 'Raw Modified Time', '原始修改时间', 'Raw Time']:
+                    if col in excel_df.columns:
+                        time_col = col
+                        break
+
+                if time_col:
+                    # 解析时间并提取日期
+                    for _, row in excel_df.iterrows():
+                        excel_sample_name = str(row[name_col]) if pd.notna(row[name_col]) else ""
+                        if excel_sample_name and excel_sample_name != 'nan':
+                            # 直接使用原始名称
+                            time_val = row[time_col] if pd.notna(row[time_col]) else None
+                            if time_val:
+                                # 尝试解析日期
+                                try:
+                                    if hasattr(time_val, 'strftime'):
+                                        date_str = time_val.strftime('%Y-%m-%d')
+                                    else:
+                                        # 尝试从字符串中提取日期
+                                        time_str = str(time_val)
+                                        match = re.search(r'(\d{4})[/-](\d{1,2})[/-](\d{1,2})', time_str)
+                                        if match:
+                                            year, month, day = match.groups()
+                                            date_str = f"{year}-{int(month):02d}-{int(day):02d}"
+                                        else:
+                                            # 尝试用 pandas 解析
+                                            dt = pd.to_datetime(time_str)
+                                            date_str = dt.strftime('%Y-%m-%d')
+                                    # 存储
+                                    sample_modified_map[excel_sample_name] = date_str
+                                except:
+                                    pass
+        except Exception as e:
+            pass
+
+    # 添加修改时间列
+    df['Sample Modified Date'] = df['Project Name'].map(sample_modified_map).fillna('')
+
     return df
 
 
@@ -82,13 +141,18 @@ def show():
     summary_csv_path = os.path.join(current_dir, "..", "data", "TC2-切换电压_分组汇总_v2.3-20260612-1.csv")
     summary_csv_path = os.path.normpath(summary_csv_path)
 
+    # Excel 文件路径（用于读取修改时间）
+    excel_path = os.path.join(current_dir, "..", "data", "TC-Raw data & Test Report.xlsx")
+    excel_path = os.path.normpath(excel_path)
+    sheet_name = "TC2-Raw data & Report"
+
     try:
         if not os.path.exists(main_csv_path):
             st.error(f"Main CSV file not found: {main_csv_path}")
             return
 
         # 加载处理后的数据（使用缓存）
-        df = load_processed_data(main_csv_path, summary_csv_path)
+        df = load_processed_data(main_csv_path, summary_csv_path, excel_path, sheet_name)
 
         # 全局样式
         st.markdown("""
@@ -128,25 +192,84 @@ def show():
         # ========== 获取所有可能的选项 ==========
         all_projects = sorted(df['Project Name'].dropna().unique().tolist())
         all_voltages = sorted(df['Voltage Condition'].dropna().unique().tolist())
+        all_dates = sorted([d for d in df['Sample Modified Date'].unique() if d and d != ''])
 
         # ========== 初始化 Session State 变量 ==========
         if 'tc2_selected_projects' not in st.session_state:
             st.session_state.tc2_selected_projects = []
         if 'tc2_selected_voltages' not in st.session_state:
             st.session_state.tc2_selected_voltages = []
+        if 'tc2_selected_date_range' not in st.session_state:
+            st.session_state.tc2_selected_date_range = ()
+        if 'tc2_previous_date_range' not in st.session_state:
+            st.session_state.tc2_previous_date_range = ()
 
-        # ========== 联动筛选器 ==========
+        # ============================================================
+        # 日期放在最前面，选择后自动全选符合条件的 Project 和 Voltage
+        # ============================================================
+
+        # ========== 第一行：日期筛选（放在最前面） ==========
+        col_date = st.columns([1])[0]
+        with col_date:
+            if all_dates:
+                st.date_input(
+                    "📅 Sample Modified (Date Range)",
+                    key="tc2_selected_date_range",
+                    help="Select start and end date for Sample modification time"
+                )
+            else:
+                st.info("No dates available")
+
+        # 【关键】检测日期是否变化，如果变化则自动全选符合条件的 Project 和 Voltage
+        current_date_range = st.session_state.tc2_selected_date_range
+        previous_date_range = st.session_state.tc2_previous_date_range
+
+        if current_date_range != previous_date_range:
+            st.session_state.tc2_previous_date_range = current_date_range
+
+            if isinstance(current_date_range, tuple) and len(current_date_range) == 2:
+                # 有日期范围被选中
+                start_str = current_date_range[0].strftime('%Y-%m-%d')
+                end_str = current_date_range[1].strftime('%Y-%m-%d')
+
+                # 筛选符合日期范围的数据
+                date_filtered_df = df[
+                    (df['Sample Modified Date'] >= start_str) &
+                    (df['Sample Modified Date'] <= end_str)
+                    ]
+
+                # 自动全选所有符合条件的 Project
+                all_projects_in_date = sorted(date_filtered_df['Project Name'].dropna().unique().tolist())
+                st.session_state.tc2_selected_projects = all_projects_in_date
+
+                # 自动全选所有符合条件的 Voltage
+                all_voltages_in_date = sorted(date_filtered_df['Voltage Condition'].dropna().unique().tolist())
+                st.session_state.tc2_selected_voltages = all_voltages_in_date
+            else:
+                # 日期被清空，清空 Project 和 Voltage 的选择
+                st.session_state.tc2_selected_projects = []
+                st.session_state.tc2_selected_voltages = []
+
+        # ========== 第二行：Project Name 和 Voltage Condition ==========
         col_filter1, col_filter2 = st.columns(2)
 
         with col_filter1:
-            # 根据已选的电压条件，计算可用的项目选项
+            # 根据已选的日期范围和电压条件，计算可用的项目选项
+            current_date_range = st.session_state.tc2_selected_date_range
             current_voltages = st.session_state.tc2_selected_voltages
+
+            available_df = df.copy()
+            if current_date_range and len(current_date_range) == 2:
+                start_str = current_date_range[0].strftime('%Y-%m-%d')
+                end_str = current_date_range[1].strftime('%Y-%m-%d')
+                available_df = available_df[
+                    (available_df['Sample Modified Date'] >= start_str) &
+                    (available_df['Sample Modified Date'] <= end_str)
+                    ]
             if current_voltages:
-                available_projects = df[df['Voltage Condition'].isin(current_voltages)][
-                    'Project Name'].dropna().unique().tolist()
-            else:
-                available_projects = all_projects
-            available_projects = sorted(available_projects)
+                available_df = available_df[available_df['Voltage Condition'].isin(current_voltages)]
+
+            available_projects = sorted(available_df['Project Name'].dropna().unique().tolist())
 
             selected_projects = st.multiselect(
                 "Filter by Project Name",
@@ -159,56 +282,80 @@ def show():
             # 检测项目选择是否变化，如果变化则自动更新电压选择
             if set(selected_projects) != set(st.session_state.tc2_selected_projects):
                 if selected_projects:
-                    # 有项目被选中，自动全选这些项目对应的所有电压
+                    # 先基于日期筛选
+                    temp_df = df.copy()
+                    if current_date_range and len(current_date_range) == 2:
+                        start_str = current_date_range[0].strftime('%Y-%m-%d')
+                        end_str = current_date_range[1].strftime('%Y-%m-%d')
+                        temp_df = temp_df[
+                            (temp_df['Sample Modified Date'] >= start_str) &
+                            (temp_df['Sample Modified Date'] <= end_str)
+                            ]
+                    # 再找这些项目对应的电压
                     voltages_to_select = set()
                     for project in selected_projects:
-                        project_voltages = df[df['Project Name'] == project][
+                        project_voltages = temp_df[temp_df['Project Name'] == project][
                             'Voltage Condition'].dropna().unique().tolist()
                         voltages_to_select.update(project_voltages)
-                    # 直接修改 session_state，右侧 multiselect 会通过 key 自动同步
                     st.session_state.tc2_selected_voltages = sorted(list(voltages_to_select))
                 else:
-                    # 没有选中任何项目，清空电压选择
                     st.session_state.tc2_selected_voltages = []
 
             st.session_state.tc2_selected_projects = selected_projects
 
         with col_filter2:
-            # 根据已选的项目，计算可用的电压选项
+            # 根据已选的日期范围和项目，计算可用的电压选项
+            current_date_range = st.session_state.tc2_selected_date_range
             current_projects = st.session_state.tc2_selected_projects
-            if current_projects:
-                available_voltages = df[df['Project Name'].isin(current_projects)][
-                    'Voltage Condition'].dropna().unique().tolist()
-            else:
-                available_voltages = all_voltages
-            available_voltages = sorted(available_voltages)
 
-            # 【关键修改】使用与 session_state 同名的 key，让 Streamlit 自动管理选中值
+            available_df = df.copy()
+            if current_date_range and len(current_date_range) == 2:
+                start_str = current_date_range[0].strftime('%Y-%m-%d')
+                end_str = current_date_range[1].strftime('%Y-%m-%d')
+                available_df = available_df[
+                    (available_df['Sample Modified Date'] >= start_str) &
+                    (available_df['Sample Modified Date'] <= end_str)
+                    ]
+            if current_projects:
+                available_df = available_df[available_df['Project Name'].isin(current_projects)]
+
+            available_voltages = sorted(available_df['Voltage Condition'].dropna().unique().tolist())
+
             st.multiselect(
                 "Filter by Voltage Condition",
                 options=available_voltages,
-                key="tc2_selected_voltages",  # key 名称与 session_state 变量名一致
+                key="tc2_selected_voltages",
                 placeholder="Select voltage conditions..."
             )
 
         # ========== 只有用户主动选择了至少一项，才显示内容 ==========
         has_selection = (len(st.session_state.tc2_selected_projects) > 0 or
-                         len(st.session_state.tc2_selected_voltages) > 0)
+                         len(st.session_state.tc2_selected_voltages) > 0 or
+                         (st.session_state.tc2_selected_date_range and len(
+                             st.session_state.tc2_selected_date_range) == 2))
 
         if not has_selection:
-            st.info("👈 Please select at least one Project Name or Voltage Condition to display the chart.")
+            st.info("👈 Please select a date range or select Project Name / Voltage Condition to display the chart.")
             return
 
         # ========== 应用筛选 ==========
         filtered_df = df.copy()
 
+        if st.session_state.tc2_selected_date_range and len(st.session_state.tc2_selected_date_range) == 2:
+            start_date, end_date = st.session_state.tc2_selected_date_range
+            start_str = start_date.strftime('%Y-%m-%d')
+            end_str = end_date.strftime('%Y-%m-%d')
+            filtered_df = filtered_df[
+                (filtered_df['Sample Modified Date'] >= start_str) &
+                (filtered_df['Sample Modified Date'] <= end_str)
+                ]
         if st.session_state.tc2_selected_projects:
             filtered_df = filtered_df[filtered_df['Project Name'].isin(st.session_state.tc2_selected_projects)]
         if st.session_state.tc2_selected_voltages:
             filtered_df = filtered_df[filtered_df['Voltage Condition'].isin(st.session_state.tc2_selected_voltages)]
 
         if len(filtered_df) == 0:
-            st.warning("No data available for the selected criteria. Please adjust your filters.")
+            st.warning("No data available. Please adjust your filters.")
             return
 
         # ========== 提取原始数据用于拟合 ==========
@@ -301,11 +448,25 @@ def show():
 
         fig.add_vline(x=0, line_width=1.5, line_dash="dash", line_color="gray", opacity=0.5)
 
+        # ========== X轴间隔改为0.5V ==========
+        all_values = positive_values + negative_values
+        if all_values:
+            x_min = min(all_values)
+            x_max = max(all_values)
+            padding = 0.5
+            x_min = np.floor((x_min - padding) / 0.5) * 0.5
+            x_max = np.ceil((x_max + padding) / 0.5) * 0.5
+            tick_values = np.arange(x_min, x_max + 0.5, 0.5)
+            tick_text = [f"{v:.1f}" for v in tick_values]
+        else:
+            tick_values = None
+            tick_text = None
+
         fig.update_layout(
             title='Switch Voltage Distribution with KDE Fit',
             xaxis_title="Voltage (V)",
             yaxis_title="Density",
-            height=500,
+            height=550,
             hovermode='closest',
             legend_title="Switch Type",
             barmode='overlay',
@@ -313,7 +474,11 @@ def show():
                 zeroline=True,
                 zerolinewidth=1,
                 zerolinecolor='lightgray',
-                tickformat='.3f'
+                tickmode='array' if tick_values is not None else None,
+                tickvals=tick_values,
+                ticktext=tick_text,
+                tickformat='.1f',
+                dtick=0.5
             ),
             yaxis=dict(gridcolor='lightgray', zeroline=True, zerolinewidth=1)
         )
@@ -341,7 +506,7 @@ def show():
         with col4:
             st.metric("📊 Positive Count", f"{len(positive_values)}")
 
-        # ========== 准备右侧电压点选项 ==========
+        # ========== 准备电压点选项数据 ==========
         positive_stats = filtered_df.groupby('Positive Voltage (V)').agg({
             'Project Name': list,
             'File Name': list,
@@ -373,165 +538,140 @@ def show():
         plot_df = pd.concat([positive_stats, negative_stats], ignore_index=True)
 
         # ========== 检测筛选是否变化，如果变化则清空右侧选中状态 ==========
-        filter_key = f"{len(st.session_state.tc2_selected_projects)}_{len(st.session_state.tc2_selected_voltages)}"
+        filter_key = f"{len(st.session_state.tc2_selected_projects)}_{len(st.session_state.tc2_selected_voltages)}_{len(st.session_state.tc2_selected_date_range) if st.session_state.tc2_selected_date_range else 0}"
         if 'tc2_last_filter_key' not in st.session_state:
             st.session_state.tc2_last_filter_key = filter_key
         elif st.session_state.tc2_last_filter_key != filter_key:
             st.session_state.tc2_last_filter_key = filter_key
             st.session_state.tc2_selected_points = []
 
-        # ========== 左右布局 ==========
-        left_col, right_col = st.columns([2, 1.5])
+        # ============================================================
+        # 图表占满整行，File Details 移到图表下方
+        # ============================================================
 
-        with left_col:
-            st.plotly_chart(fig, width='stretch')
+        # ========== 显示图表（占满整行） ==========
+        st.plotly_chart(fig, width='stretch')
 
-        with right_col:
-            st.markdown("""
-                <style>
-                    div[data-testid='column']:nth-child(2) {
-                        padding-left: 0px !important;
-                    }
-                    div[data-testid='column']:nth-child(2) h4 {
-                        font-size: 14px !important;
-                        font-weight: bold !important;
-                        margin-bottom: 10px !important;
-                    }
-                    div[data-testid='stDataFrame'] td {
-                        font-size: 11px !important;
-                    }
-                    div[data-testid='stDataFrame'] th {
-                        font-size: 11px !important;
-                    }
-                    div[data-baseweb="select"] * {
-                        font-size: 13px !important;
-                        color: #1f1f1f !important;
-                    }
-                    div[role="radiogroup"] label {
-                        font-size: 12px !important;
-                    }
-                </style>
-            """, unsafe_allow_html=True)
+        # ========== File Details 部分（移到图表下方） ==========
+        st.markdown("---")
+        st.markdown("<h4 style='font-size: 14px; margin-bottom: 10px;'>📋 File Details</h4>", unsafe_allow_html=True)
 
-            st.markdown("<h4 style='font-size: 14px; margin-bottom: 10px; margin-top: 0px;'>📋 File Details</h4>",
-                        unsafe_allow_html=True)
+        sort_option = st.radio(
+            "Sort by",
+            options=["Voltage (Low to High)", "Voltage (High to Low)", "Frequency (Low to High)",
+                     "Frequency (High to Low)"],
+            horizontal=True,
+            label_visibility="collapsed",
+            key="tc2_sort_radio"
+        )
 
-            sort_option = st.radio(
-                "Sort by",
-                options=["Voltage (Low to High)", "Voltage (High to Low)", "Frequency (Low to High)",
-                         "Frequency (High to Low)"],
-                horizontal=True,
-                label_visibility="collapsed",
-                key="tc2_sort_radio"
-            )
+        if sort_option == "Voltage (Low to High)":
+            sorted_df = plot_df.sort_values('Voltage (V)', ascending=True)
+        elif sort_option == "Voltage (High to Low)":
+            sorted_df = plot_df.sort_values('Voltage (V)', ascending=False)
+        elif sort_option == "Frequency (Low to High)":
+            sorted_df = plot_df.sort_values('Frequency', ascending=True)
+        else:
+            sorted_df = plot_df.sort_values('Frequency', ascending=False)
 
-            if sort_option == "Voltage (Low to High)":
-                sorted_df = plot_df.sort_values('Voltage (V)', ascending=True)
-            elif sort_option == "Voltage (High to Low)":
-                sorted_df = plot_df.sort_values('Voltage (V)', ascending=False)
-            elif sort_option == "Frequency (Low to High)":
-                sorted_df = plot_df.sort_values('Frequency', ascending=True)
-            else:
-                sorted_df = plot_df.sort_values('Frequency', ascending=False)
+        point_labels = [f"{row['Frequency']} - {row['Voltage (V)']:.3f} V ({row['Type']})"
+                        for _, row in sorted_df.iterrows()]
 
-            point_labels = [f"{row['Frequency']} - {row['Voltage (V)']:.3f} V ({row['Type']})"
-                            for _, row in sorted_df.iterrows()]
+        all_indices = list(range(len(point_labels)))
 
-            all_indices = list(range(len(point_labels)))
+        if 'tc2_selected_points' not in st.session_state:
+            st.session_state.tc2_selected_points = []
 
-            if 'tc2_selected_points' not in st.session_state:
-                st.session_state.tc2_selected_points = []
+        selected_indices = st.multiselect(
+            "Select voltage points to display",
+            options=all_indices,
+            format_func=lambda i: point_labels[i],
+            default=st.session_state.tc2_selected_points,
+            placeholder="Select one or more voltage points...",
+            key="tc2_point_multiselect"
+        )
 
-            selected_indices = st.multiselect(
-                "Select voltage points to display",
-                options=all_indices,
-                format_func=lambda i: point_labels[i],
-                default=st.session_state.tc2_selected_points,
-                placeholder="Select one or more voltage points...",
-                key="tc2_point_multiselect"
-            )
+        st.session_state.tc2_selected_points = selected_indices
 
-            st.session_state.tc2_selected_points = selected_indices
+        st.markdown("---")
 
-            st.markdown("---")
+        if selected_indices:
+            selected_voltages_data = [sorted_df.iloc[idx] for idx in selected_indices]
 
-            if selected_indices:
-                selected_voltages_data = [sorted_df.iloc[idx] for idx in selected_indices]
+            all_details_data = []
+            for selected_row in selected_voltages_data:
+                file_count = len(selected_row['Project Name'])
 
-                all_details_data = []
-                for selected_row in selected_voltages_data:
-                    file_count = len(selected_row['Project Name'])
+                all_details_data.append({
+                    'Project': f'--- {selected_row["Type"]} @ {selected_row["Voltage (V)"]:.3f} V (Freq: {selected_row["Frequency"]}) ---',
+                    'File': '',
+                    'Condition': '',
+                    'Negative Voltage': '',
+                    'Positive Voltage': '',
+                    'N Avg (Project)': '',
+                    'P Avg (Project)': '',
+                    'N Median (Project)': '',
+                    'P Median (Project)': '',
+                })
+
+                for i in range(file_count):
+                    project = selected_row['Project Name'][i]
+                    file_name = selected_row['File Name'][i]
+                    voltage_condition = selected_row['Voltage Condition'][i]
+
+                    if selected_row['Type'] == 'Positive Switch':
+                        other_voltage = selected_row['Negative Voltage (V)'][i]
+                        pos_voltage = selected_row['Voltage (V)']
+                        neg_voltage = other_voltage
+                    else:
+                        other_voltage = selected_row['Positive Voltage (V)'][i]
+                        pos_voltage = other_voltage
+                        neg_voltage = selected_row['Voltage (V)']
+
+                    n_median = selected_row['N-switch Median (V)'][i] if isinstance(
+                        selected_row['N-switch Median (V)'], list) else selected_row['N-switch Median (V)']
+                    p_median = selected_row['P-switch Median (V)'][i] if isinstance(
+                        selected_row['P-switch Median (V)'], list) else selected_row['P-switch Median (V)']
+                    n_avg = selected_row['N-switch Average (V)'][i] if isinstance(
+                        selected_row['N-switch Average (V)'], list) else selected_row['N-switch Average (V)']
+                    p_avg = selected_row['P-switch Average (V)'][i] if isinstance(
+                        selected_row['P-switch Average (V)'], list) else selected_row['P-switch Average (V)']
+
+                    def fmt_voltage(val):
+                        if pd.isna(val):
+                            return 'N/A'
+                        try:
+                            return f"{float(val):.3f} V"
+                        except:
+                            return str(val)
+
+                    def fmt_value(val):
+                        if pd.isna(val) or val == 'N/A':
+                            return 'N/A'
+                        try:
+                            return f"{float(val):.3f} V"
+                        except:
+                            return str(val)
 
                     all_details_data.append({
-                        'Project': f'--- {selected_row["Type"]} @ {selected_row["Voltage (V)"]:.3f} V (Freq: {selected_row["Frequency"]}) ---',
-                        'File': '',
-                        'Condition': '',
-                        'Negative Voltage': '',
-                        'Positive Voltage': '',
-                        'N Avg (Project)': '',
-                        'P Avg (Project)': '',
-                        'N Median (Project)': '',
-                        'P Median (Project)': '',
+                        'Project': project,
+                        'File': file_name,
+                        'Condition': voltage_condition,
+                        'Positive Voltage': fmt_voltage(pos_voltage),
+                        'Negative Voltage': fmt_voltage(neg_voltage),
+                        'N Avg (Project)': fmt_value(n_avg),
+                        'P Avg (Project)': fmt_value(p_avg),
+                        'N Median (Project)': fmt_value(n_median),
+                        'P Median (Project)': fmt_value(p_median),
                     })
 
-                    for i in range(file_count):
-                        project = selected_row['Project Name'][i]
-                        file_name = selected_row['File Name'][i]
-                        voltage_condition = selected_row['Voltage Condition'][i]
-
-                        if selected_row['Type'] == 'Positive Switch':
-                            other_voltage = selected_row['Negative Voltage (V)'][i]
-                            pos_voltage = selected_row['Voltage (V)']
-                            neg_voltage = other_voltage
-                        else:
-                            other_voltage = selected_row['Positive Voltage (V)'][i]
-                            pos_voltage = other_voltage
-                            neg_voltage = selected_row['Voltage (V)']
-
-                        n_median = selected_row['N-switch Median (V)'][i] if isinstance(
-                            selected_row['N-switch Median (V)'], list) else selected_row['N-switch Median (V)']
-                        p_median = selected_row['P-switch Median (V)'][i] if isinstance(
-                            selected_row['P-switch Median (V)'], list) else selected_row['P-switch Median (V)']
-                        n_avg = selected_row['N-switch Average (V)'][i] if isinstance(
-                            selected_row['N-switch Average (V)'], list) else selected_row['N-switch Average (V)']
-                        p_avg = selected_row['P-switch Average (V)'][i] if isinstance(
-                            selected_row['P-switch Average (V)'], list) else selected_row['P-switch Average (V)']
-
-                        def fmt_voltage(val):
-                            if pd.isna(val):
-                                return 'N/A'
-                            try:
-                                return f"{float(val):.3f} V"
-                            except:
-                                return str(val)
-
-                        def fmt_value(val):
-                            if pd.isna(val) or val == 'N/A':
-                                return 'N/A'
-                            try:
-                                return f"{float(val):.3f} V"
-                            except:
-                                return str(val)
-
-                        all_details_data.append({
-                            'Project': project,
-                            'File': file_name,
-                            'Condition': voltage_condition,
-                            'Positive Voltage': fmt_voltage(pos_voltage),
-                            'Negative Voltage': fmt_voltage(neg_voltage),
-                            'N Avg (Project)': fmt_value(n_avg),
-                            'P Avg (Project)': fmt_value(p_avg),
-                            'N Median (Project)': fmt_value(n_median),
-                            'P Median (Project)': fmt_value(p_median),
-                        })
-
-                details_df = pd.DataFrame(all_details_data)
-                st.markdown(
-                    f"**{len(selected_indices)} voltage point(s) selected, {len(details_df) - len(selected_indices)} files shown**")
-                st.dataframe(details_df, width='stretch', height=500)
-            else:
-                st.info(
-                    "No voltage points selected. Select voltage points from the dropdown above to display file details.")
+            details_df = pd.DataFrame(all_details_data)
+            st.markdown(
+                f"**{len(selected_indices)} voltage point(s) selected, {len(details_df) - len(selected_indices)} files shown**")
+            st.dataframe(details_df, width='stretch', height=500)
+        else:
+            st.info(
+                "No voltage points selected. Select voltage points from the dropdown above to display file details.")
 
     except Exception as e:
         st.error(f"Error: {str(e)}")
