@@ -7,13 +7,62 @@ import os
 import re
 
 
-def load_all_project_data(speed_data_dir):
-    """加载所有项目的CSV数据"""
+def load_all_project_data(speed_data_dir, excel_path, sheet_name):
+    """加载所有项目的CSV数据，同时从Excel读取修改时间"""
     all_data = {}
+    sample_modified_map = {}
+
+    # ========== 从 Excel 读取修改时间 ==========
+    if os.path.exists(excel_path):
+        try:
+            excel_file = pd.ExcelFile(excel_path)
+            if sheet_name in excel_file.sheet_names:
+                excel_df = pd.read_excel(excel_path, sheet_name=sheet_name)
+
+                # 识别 Name 列
+                name_col = None
+                for col in ['Name', '名称', 'Sample', '样品名称', 'Sample Name']:
+                    if col in excel_df.columns:
+                        name_col = col
+                        break
+                if name_col is None:
+                    name_col = excel_df.columns[0]
+
+                # 识别 Raw修改时间 列
+                time_col = None
+                for col in ['Raw修改时间', 'Raw Modified Time', '原始修改时间', 'Raw Time']:
+                    if col in excel_df.columns:
+                        time_col = col
+                        break
+
+                if time_col and name_col:
+                    for _, row in excel_df.iterrows():
+                        excel_sample_name = str(row[name_col]) if pd.notna(row[name_col]) else ""
+                        if excel_sample_name and excel_sample_name != 'nan':
+                            # 直接使用原始名称，不做任何处理
+                            time_val = row[time_col] if pd.notna(row[time_col]) else None
+                            if time_val:
+                                try:
+                                    if hasattr(time_val, 'strftime'):
+                                        date_str = time_val.strftime('%Y-%m-%d')
+                                    else:
+                                        time_str = str(time_val)
+                                        match = re.search(r'(\d{4})[/-](\d{1,2})[/-](\d{1,2})', time_str)
+                                        if match:
+                                            year, month, day = match.groups()
+                                            date_str = f"{year}-{int(month):02d}-{int(day):02d}"
+                                        else:
+                                            dt = pd.to_datetime(time_str)
+                                            date_str = dt.strftime('%Y-%m-%d')
+                                    sample_modified_map[excel_sample_name] = date_str
+                                except:
+                                    pass
+        except Exception as e:
+            st.warning(f"Could not read modification times from Excel: {e}")
 
     if not os.path.exists(speed_data_dir):
         st.error(f"Speed data directory not found: {speed_data_dir}")
-        return all_data
+        return all_data, sample_modified_map
 
     csv_files = [f for f in os.listdir(speed_data_dir) if f.endswith('.csv') and f.startswith('分组统计_')]
 
@@ -56,12 +105,18 @@ def load_all_project_data(speed_data_dir):
                 if col in df.columns:
                     df[col] = pd.to_numeric(df[col], errors='coerce')
 
+            # 添加修改时间
+            if project_name in sample_modified_map:
+                df['Sample Modified Date'] = sample_modified_map[project_name]
+            else:
+                df['Sample Modified Date'] = ""
+
             all_data[project_name] = df
 
         except Exception as e:
             st.error(f"Error loading {csv_file}: {e}")
 
-    return all_data
+    return all_data, sample_modified_map
 
 
 def extract_subfolder_path(full_path, project_name):
@@ -190,6 +245,9 @@ def create_shmoo_figure(df, value_col, total_median_col, mad_col, threshold_mult
     text_matrix = []
     hover_matrix = []
 
+    # 存储每个格子是否有任何 Fail
+    cell_has_fail = {}
+
     for y in y_values:
         z_row = []
         text_row = []
@@ -199,14 +257,19 @@ def create_shmoo_figure(df, value_col, total_median_col, mad_col, threshold_mult
             if key in cell_data:
                 items = cell_data[key]
 
-                # 构建悬停文本（包含所有子项）
+                # 构建悬停文本（包含所有子项）- 倒序显示，与子矩形顺序一致
                 hover_lines = []
-                for idx, item in enumerate(items, 1):
+                # 使用 reversed() 让数据倒序，idx 从 len(items) 开始递减
+                for idx, item in enumerate(reversed(items), len(items)):
                     sub_path = extract_subfolder_path(item['full_path'], project_name)
                     status = "Pass" if item['is_pass'] else "Fail"
                     hover_lines.append(
                         f"[{idx}] {sub_path} | Value: {item['value']:.0f} | {status} | Row Count: {item['row_count']}")
                 hover_text = "<br>".join(hover_lines)
+
+                # 检查是否有任何 Fail
+                any_fail = any(not item['is_pass'] for item in items)
+                cell_has_fail[key] = any_fail
 
                 if len(items) == 1:
                     # 单行数据
@@ -214,9 +277,8 @@ def create_shmoo_figure(df, value_col, total_median_col, mad_col, threshold_mult
                     z_matrix_val = 1 if item['is_pass'] else 2
                     text_val = f"{item['value']:.0f}"
                 else:
-                    # 多行数据：全部pass才算绿色，否则红色
-                    all_pass = all(item['is_pass'] for item in items)
-                    z_matrix_val = 1 if all_pass else 2
+                    # 多行数据：只要有一个 Fail，整体就是红色
+                    z_matrix_val = 2 if any_fail else 1
                     # 显示多行数值，前面加上序号
                     text_val = "<br>".join([f"{idx}: {item['value']:.0f}" for idx, item in enumerate(items, 1)])
 
@@ -227,6 +289,7 @@ def create_shmoo_figure(df, value_col, total_median_col, mad_col, threshold_mult
                 z_row.append(np.nan)
                 text_row.append("")
                 hover_row.append("")
+                cell_has_fail[key] = False
         z_matrix.append(z_row)
         text_matrix.append(text_row)
         hover_matrix.append(hover_row)
@@ -267,8 +330,17 @@ def create_shmoo_figure(df, value_col, total_median_col, mad_col, threshold_mult
             if n_items > 1:
                 # 多行数据 - 添加水平划分的子矩形
                 sub_height = 1.0 / n_items
+
+                # 检查这个格子是否有任何 Fail
+                has_fail = cell_has_fail.get(key, False)
+
                 for i, item in enumerate(items):
-                    color_hex = '#2e7d32' if item['is_pass'] else '#c62828'
+                    # 如果整个格子有 Fail，所有子矩形都变红
+                    if has_fail:
+                        color_hex = '#c62828'  # 全部红色
+                    else:
+                        color_hex = '#2e7d32'  # 全部绿色
+
                     y_offset = i * sub_height
 
                     x0 = x_idx - 0.5
@@ -397,10 +469,15 @@ def show():
     speed_data_dir = os.path.join(current_dir, "..", "data", "speed data")
     speed_data_dir = os.path.normpath(speed_data_dir)
 
+    # Excel 文件路径（用于读取修改时间）
+    excel_path = os.path.join(current_dir, "..", "data", "TC-Raw data & Test Report.xlsx")
+    excel_path = os.path.normpath(excel_path)
+    sheet_name = "TC3-Raw data & Report"
+
     st.markdown("<h3 style='font-size: 20px; margin-bottom: 5px;'>📈 Shmoo Plot - Vset & Vreset</h3>",
                 unsafe_allow_html=True)
 
-    all_data = load_all_project_data(speed_data_dir)
+    all_data, sample_modified_map = load_all_project_data(speed_data_dir, excel_path, sheet_name)
 
     if not all_data:
         st.warning("No project data found. Please ensure CSV files are in 'data/speed data' folder")
@@ -408,15 +485,82 @@ def show():
             "Required columns: 时间, WN, WP, RL_中位数, RH_中位数, RL_项目总中位数, RH_项目总中位数, RL_MAD, RH_MAD, 父路径, 涉及PT_Row文件夹数")
         return
 
+    # ========== 构建项目日期映射 ==========
+    all_project_names = sorted(all_data.keys())
+    project_date_map = {}
+    for project in all_project_names:
+        if project in sample_modified_map:
+            project_date_map[project] = sample_modified_map[project]
+        else:
+            project_date_map[project] = ""
+
+    all_dates = sorted([d for d in set(project_date_map.values()) if d and d != ''])
+
     st.markdown("---")
 
+    # ========== 初始化 Session State ==========
+    if 'shmoo_selected_date_range' not in st.session_state:
+        st.session_state.shmoo_selected_date_range = ()
+    if 'shmoo_previous_date_range' not in st.session_state:
+        st.session_state.shmoo_previous_date_range = ()
+    if 'shmoo_selected_projects' not in st.session_state:
+        st.session_state.shmoo_selected_projects = []
+
+    # ========== 日期筛选（支持范围选择） ==========
+    col_date = st.columns([1])[0]
+    with col_date:
+        if all_dates:
+            st.date_input(
+                "📅 Sample Modified (Date Range)",
+                key="shmoo_selected_date_range",
+                help="Select start and end date for Sample modification time"
+            )
+        else:
+            st.info("No dates available - please check Excel file has 'Raw修改时间' column")
+
+    # ========== 先计算过滤后的项目列表 ==========
+    current_date_range = st.session_state.shmoo_selected_date_range
+    previous_date_range = st.session_state.shmoo_previous_date_range
+
+    filtered_project_names = all_project_names.copy()
+    if isinstance(current_date_range, tuple) and len(current_date_range) == 2:
+        start_str = current_date_range[0].strftime('%Y-%m-%d')
+        end_str = current_date_range[1].strftime('%Y-%m-%d')
+        filtered_project_names = [
+            p for p in all_project_names
+            if project_date_map.get(p, "") and start_str <= project_date_map[p] <= end_str
+        ]
+
+    # ========== 检测日期是否变化，自动全选符合条件的项目 ==========
+    if current_date_range != previous_date_range:
+        st.session_state.shmoo_previous_date_range = current_date_range
+
+        if filtered_project_names:
+            # 自动全选所有过滤后的项目
+            st.session_state.shmoo_selected_projects = filtered_project_names
+        else:
+            # 没有符合条件的项目，清空选择
+            st.session_state.shmoo_selected_projects = []
+
+    # 【修复】确保选中的项目都在过滤后的列表中（去除已不在列表中的项目）
+    if st.session_state.shmoo_selected_projects:
+        valid_selected = [p for p in st.session_state.shmoo_selected_projects if p in filtered_project_names]
+        if len(valid_selected) != len(st.session_state.shmoo_selected_projects):
+            st.session_state.shmoo_selected_projects = valid_selected
+
+    st.markdown("---")
+
+    # ========== 项目选择（默认使用 session_state 中的值） ==========
     selected_projects = st.multiselect(
         "Select Project(s)",
-        options=sorted(all_data.keys()),
-        default=[],
+        options=sorted(filtered_project_names),
+        default=st.session_state.shmoo_selected_projects,
         placeholder="Choose projects to display...",
         key="shmoo_project_select"
     )
+
+    # 更新 session_state
+    st.session_state.shmoo_selected_projects = selected_projects
 
     if not selected_projects:
         st.info("👈 Please select one or more projects to display Shmoo plots.")
@@ -459,6 +603,8 @@ def show():
         df = all_data[project].copy()
 
         st.markdown(f"### 📁 {project}")
+        if project in project_date_map and project_date_map[project]:
+            st.caption(f"📅 Modified: {project_date_map[project]}")
 
         rl_total = df['RL_总中位数'].iloc[0] if not df['RL_总中位数'].isna().all() else 0
         rl_mad = df['RL_MAD'].iloc[0] if not df['RL_MAD'].isna().all() else 1
