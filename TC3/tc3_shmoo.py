@@ -39,7 +39,6 @@ def load_all_project_data(speed_data_dir, excel_path, sheet_name):
                     for _, row in excel_df.iterrows():
                         excel_sample_name = str(row[name_col]) if pd.notna(row[name_col]) else ""
                         if excel_sample_name and excel_sample_name != 'nan':
-                            # 直接使用原始名称，不做任何处理
                             time_val = row[time_col] if pd.notna(row[time_col]) else None
                             if time_val:
                                 try:
@@ -257,14 +256,16 @@ def create_shmoo_figure(df, value_col, total_median_col, mad_col, threshold_mult
             if key in cell_data:
                 items = cell_data[key]
 
-                # 构建悬停文本（包含所有子项）- 倒序显示，与子矩形顺序一致
+                # 构建悬停文本（包含所有子项）
                 hover_lines = []
-                # 使用 reversed() 让数据倒序，idx 从 len(items) 开始递减
-                for idx, item in enumerate(reversed(items), len(items)):
+                # 将 items 反转，使悬停顺序和格子内显示一致（从上到下）
+                reversed_items = list(reversed(items))
+                for idx, item in enumerate(reversed_items, 1):
+                    reversed_idx = len(items) - idx + 1
                     sub_path = extract_subfolder_path(item['full_path'], project_name)
                     status = "Pass" if item['is_pass'] else "Fail"
                     hover_lines.append(
-                        f"[{idx}] {sub_path} | Value: {item['value']:.0f} | {status} | Row Count: {item['row_count']}")
+                        f"[{reversed_idx}] {sub_path} | Value: {item['value']:.0f} | {status} | Row Count: {item['row_count']}")
                 hover_text = "<br>".join(hover_lines)
 
                 # 检查是否有任何 Fail
@@ -542,7 +543,7 @@ def show():
             # 没有符合条件的项目，清空选择
             st.session_state.shmoo_selected_projects = []
 
-    # 【修复】确保选中的项目都在过滤后的列表中（去除已不在列表中的项目）
+    # 确保选中的项目都在过滤后的列表中（去除已不在列表中的项目）
     if st.session_state.shmoo_selected_projects:
         valid_selected = [p for p in st.session_state.shmoo_selected_projects if p in filtered_project_names]
         if len(valid_selected) != len(st.session_state.shmoo_selected_projects):
