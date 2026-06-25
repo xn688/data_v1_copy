@@ -6,8 +6,13 @@ import os
 def show():
     # 读取 CSV
     current_dir = os.path.dirname(os.path.abspath(__file__))
-    csv_path = os.path.join(current_dir, "..", "data", "TC2-器件状态统计汇总_v1.9_20260427-2.csv")
+    csv_path = os.path.join(current_dir, "..", "data", "TC2-器件状态统计汇总_v2.3_20260612-1.csv")
     csv_path = os.path.normpath(csv_path)
+
+    # Excel 文件路径（用于读取修改时间）
+    excel_path = os.path.join(current_dir, "..", "data", "TC-Raw data & Test Report.xlsx")
+    excel_path = os.path.normpath(excel_path)
+    sheet_name = "TC2-Raw data & Report"
 
     try:
         if not os.path.exists(csv_path):
@@ -20,7 +25,7 @@ def show():
 
         # 重命名列
         rename_map = {
-            '项目名': 'Project Name',
+            '项目名': 'Sample',
             '项目标记': 'Status Flag',
             '电压条件文件夹': 'Voltage Folder',
             '电压条件': 'Voltage Condition',
@@ -49,6 +54,65 @@ def show():
         for col in ['Working %', 'Short %', 'Open %', 'Unworking %', 'Other %']:
             if col in df.columns:
                 df[col] = df[col].astype(str).str.replace('%', '').astype(float)
+
+        # ========== 从 Excel 读取修改时间 ==========
+        sample_modified_map = {}
+        if os.path.exists(excel_path):
+            try:
+                excel_file = pd.ExcelFile(excel_path)
+                if sheet_name in excel_file.sheet_names:
+                    excel_df = pd.read_excel(excel_path, sheet_name=sheet_name)
+
+                    # 识别 Name 列和时间列
+                    name_col = None
+                    for col in ['Name', '名称', 'Sample', '样品名称', 'Sample Name']:
+                        if col in excel_df.columns:
+                            name_col = col
+                            break
+                    if name_col is None:
+                        name_col = excel_df.columns[0]
+
+                    # 识别 Raw修改时间 列
+                    time_col = None
+                    for col in ['Raw修改时间', 'Raw Modified Time', '原始修改时间', 'Raw Time']:
+                        if col in excel_df.columns:
+                            time_col = col
+                            break
+
+                    if time_col:
+                        # 解析时间并提取日期
+                        for _, row in excel_df.iterrows():
+                            sample_name = str(row[name_col]) if pd.notna(row[name_col]) else ""
+                            if sample_name and sample_name != 'nan':
+                                time_val = row[time_col] if pd.notna(row[time_col]) else None
+                                if time_val:
+                                    # 尝试解析日期
+                                    try:
+                                        if hasattr(time_val, 'strftime'):
+                                            date_str = time_val.strftime('%Y-%m-%d')
+                                        else:
+                                            # 尝试从字符串中提取日期
+                                            import re
+                                            time_str = str(time_val)
+                                            match = re.search(r'(\d{4})[/-](\d{1,2})[/-](\d{1,2})', time_str)
+                                            if match:
+                                                year, month, day = match.groups()
+                                                date_str = f"{year}-{int(month):02d}-{int(day):02d}"
+                                            else:
+                                                # 尝试用 pandas 解析
+                                                dt = pd.to_datetime(time_str)
+                                                date_str = dt.strftime('%Y-%m-%d')
+                                        sample_modified_map[sample_name] = date_str
+                                    except:
+                                        pass
+            except Exception as e:
+                st.warning(f"Could not read modification times from Excel: {e}")
+
+        # ========== 添加修改时间列到 df ==========
+        df['Sample Modified Date'] = df['Sample'].map(sample_modified_map).fillna('')
+
+        # ========== 获取所有日期用于筛选 ==========
+        all_dates = sorted([d for d in df['Sample Modified Date'].unique() if d and d != ''])
 
         # ========== 根据标记列生成显示内容 ==========
         def get_total_devices_display(row):
@@ -89,26 +153,17 @@ def show():
             if col in df.columns:
                 df[col] = df[col].apply(lambda x: f"{x:.1f}%")
 
-        # ========== 简单提示 ==========
-        st.markdown(
-            """
-            <div style='text-align: right; font-size: 11px; color: #666; margin-bottom: 10px;'>
-            ⚠️ Warning: Data issues (except BEOL which is not current design)
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
-
         # ========== 筛选器 ==========
-        col1, col2 = st.columns(2)
+        col1, col2, col3 = st.columns(3)
 
         with col1:
-            project_options = sorted(df['Project Name'].unique().tolist())
-            selected_projects = st.multiselect(
-                "Project Name",
-                options=project_options,
+            sample_options = sorted(df['Sample'].unique().tolist())
+            selected_samples = st.multiselect(
+                "🔍 Sample",
+                options=sample_options,
                 default=[],
-                placeholder="Select projects..."
+                placeholder="Select samples...",
+                key="tc2_device_sample_filter"
             )
 
         with col2:
@@ -117,43 +172,70 @@ def show():
                 "Voltage Condition",
                 options=voltage_options,
                 default=[],
-                placeholder="Select voltages..."
+                placeholder="Select voltages...",
+                key="tc2_device_voltage_filter"
             )
 
-        # 应用筛选
+        with col3:
+            if all_dates:
+                selected_date_range = st.date_input(
+                    "📅 Sample Modified",
+                    value=(),
+                    key="tc2_device_date_filter",
+                    help="Select start and end date for Sample modification time"
+                )
+            else:
+                st.info("No dates available")
+                selected_date_range = ()
+
+        # ========== 应用筛选 ==========
         filtered_df = df.copy()
 
-        if selected_projects:
-            filtered_df = filtered_df[filtered_df['Project Name'].isin(selected_projects)]
+        if selected_samples:
+            filtered_df = filtered_df[filtered_df['Sample'].isin(selected_samples)]
 
         if selected_voltages:
             filtered_df = filtered_df[filtered_df['Voltage Condition'].isin(selected_voltages)]
 
-        # ========== 项目交替颜色 ==========
-        unique_projects = filtered_df['Project Name'].unique()
-        colors = ['#F0F8FF', '#FAFAFA']
-        project_color_map = {project: colors[i % len(colors)] for i, project in enumerate(unique_projects)}
+        if selected_date_range and len(selected_date_range) == 2:
+            start_date, end_date = selected_date_range
+            start_str = start_date.strftime('%Y-%m-%d')
+            end_str = end_date.strftime('%Y-%m-%d')
+            filtered_df = filtered_df[
+                (filtered_df['Sample Modified Date'] >= start_str) &
+                (filtered_df['Sample Modified Date'] <= end_str)
+                ]
 
-        def highlight_projects(row):
-            project_name = row['Project Name']
-            color = project_color_map.get(project_name, '#FFFFFF')
+        # ========== Sample 交替颜色 ==========
+        unique_samples = filtered_df['Sample'].unique()
+        colors = ['#F0F8FF', '#FAFAFA']
+        sample_color_map = {sample: colors[i % len(colors)] for i, sample in enumerate(unique_samples)}
+
+        def highlight_samples(row):
+            sample_name = row['Sample']
+            color = sample_color_map.get(sample_name, '#FFFFFF')
             return ['background-color: {}'.format(color)] * len(row)
 
-        # 准备最终显示的列
-        final_columns = ['Project Name', 'Voltage Condition',
+        # ========== 准备最终显示的列（Sample Modified Date 放在最后一列） ==========
+        final_columns = ['Sample', 'Voltage Condition',
                          'Working', 'Working %', 'Short', 'Short %',
                          'Open', 'Open %', 'Unworking', 'Unworking %',
-                         'Total Devices Display']
+                         'Total Devices Display', 'Sample Modified Date']
 
         final_df = filtered_df[final_columns].copy()
         final_df = final_df.rename(columns={'Total Devices Display': 'Total Devices'})
 
+        # 把日期中的 - 替换为 / 显示
+        final_df['Sample Modified Date'] = final_df['Sample Modified Date'].apply(
+            lambda x: x.replace('-', '/') if x and isinstance(x, str) else x
+        )
+
         # 应用样式
-        styled_df = final_df.style.apply(highlight_projects, axis=1)
+        styled_df = final_df.style.apply(highlight_samples, axis=1)
 
         # 数值列居中
         center_cols = ['Working', 'Working %', 'Short', 'Short %', 'Open', 'Open %', 'Unworking', 'Unworking %',
-                       'Total Devices']
+                       'Total Devices', 'Sample Modified Date']
         existing_center = [col for col in center_cols if col in final_df.columns]
         styled_df = styled_df.set_properties(**{'text-align': 'center'}, subset=existing_center)
 
@@ -162,6 +244,20 @@ def show():
             'selector': 'th',
             'props': [('text-align', 'center')]
         }])
+
+        # ========== 显示筛选状态 ==========
+        filter_active = []
+        if selected_samples:
+            filter_active.append(f"Sample: {len(selected_samples)} selected")
+        if selected_voltages:
+            filter_active.append(f"Voltage: {len(selected_voltages)} selected")
+        if selected_date_range and len(selected_date_range) == 2:
+            filter_active.append(f"Sample Modified: {selected_date_range[0]} ~ {selected_date_range[1]}")
+
+        if filter_active:
+            st.caption(f"🔍 Filtering by: {', '.join(filter_active)}")
+
+        st.write(f"**Found {len(filtered_df)} record(s)**")
 
         # ========== 显示表格 ==========
         st.dataframe(styled_df, width='stretch', height=500)
