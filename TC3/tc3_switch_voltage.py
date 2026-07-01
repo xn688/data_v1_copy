@@ -1,3 +1,4 @@
+# TC3/tc3_switch_voltage.py
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
@@ -9,22 +10,22 @@ import re
 
 # ========== 缓存：数据加载和处理 ==========
 @st.cache_data
-def load_processed_data(main_csv_path, summary_csv_path, excel_path, sheet_name):
+def load_processed_data(main_excel_path, summary_excel_path, raw_excel_path, sheet_name):
     """加载并处理原始数据，缓存结果"""
 
-    # 读取主数据
-    df = pd.read_csv(main_csv_path, encoding='utf-8')
-    df.columns = df.columns.str.strip().str.replace('\ufeff', '')
+    # 读取主数据（从 Excel）
+    df = pd.read_excel(main_excel_path, sheet_name="TC3-切换电压-总结果")
+    df.columns = df.columns.str.strip()
 
-    # 读取分组汇总数据
+    # 读取分组汇总数据（从 Excel）
     n_median_map = {}
     p_median_map = {}
     n_avg_map = {}
     p_avg_map = {}
 
-    if os.path.exists(summary_csv_path):
-        df_summary = pd.read_csv(summary_csv_path, encoding='utf-8')
-        df_summary.columns = df_summary.columns.str.strip().str.replace('\ufeff', '')
+    try:
+        df_summary = pd.read_excel(summary_excel_path, sheet_name="TC3-切换电压-分组汇总")
+        df_summary.columns = df_summary.columns.str.strip()
         df_summary = df_summary.rename(columns={
             '所属项目': 'Project Name',
             '电压条件': 'Voltage Condition',
@@ -39,6 +40,8 @@ def load_processed_data(main_csv_path, summary_csv_path, excel_path, sheet_name)
             p_median_map[key] = row.get('P-switch Median (V)', 'N/A')
             n_avg_map[key] = row.get('N-switch Average (V)', 'N/A')
             p_avg_map[key] = row.get('P-switch Average (V)', 'N/A')
+    except Exception as e:
+        st.warning(f"Could not read summary data: {e}")
 
     # 重命名主数据的列
     df = df.rename(columns={
@@ -59,13 +62,13 @@ def load_processed_data(main_csv_path, summary_csv_path, excel_path, sheet_name)
     # 删除临时列
     df = df.drop(columns=['Match Key'])
 
-    # ========== 从 Excel 读取修改时间 ==========
+    # ========== 从 Raw Excel 读取修改时间 ==========
     sample_modified_map = {}
-    if os.path.exists(excel_path):
+    if os.path.exists(raw_excel_path):
         try:
-            excel_file = pd.ExcelFile(excel_path)
+            excel_file = pd.ExcelFile(raw_excel_path)
             if sheet_name in excel_file.sheet_names:
-                excel_df = pd.read_excel(excel_path, sheet_name=sheet_name)
+                excel_df = pd.read_excel(raw_excel_path, sheet_name=sheet_name)
 
                 # 识别 Name 列和时间列
                 name_col = None
@@ -134,28 +137,57 @@ def compute_kde_curve(values, n_points=100):
     return x, y
 
 
+# ========== 计算直方图数据（用于 Bar 图） ==========
+@st.cache_data
+def compute_histogram_data(values, bin_width, x_min, x_max):
+    """计算直方图数据，返回 bin 中心、密度和区间标签"""
+    if not values:
+        return [], [], []
+
+    # 计算 bin 边界
+    bins = np.arange(x_min, x_max + bin_width, bin_width)
+
+    # 计算直方图
+    hist_counts, bin_edges = np.histogram(values, bins=bins)
+
+    # 计算密度（归一化）
+    total_count = len(values)
+    hist_density = hist_counts / (total_count * bin_width)
+
+    # 构建区间标签
+    bin_labels = []
+    bin_centers = []
+    for i in range(len(bin_edges) - 1):
+        start = bin_edges[i]
+        end = bin_edges[i + 1]
+        bin_labels.append(f"{start:.1f} ~ {end:.1f} V")
+        bin_centers.append((start + end) / 2)
+
+    return bin_centers, hist_density, bin_labels
+
+
 def show():
     current_dir = os.path.dirname(os.path.abspath(__file__))
 
-    main_csv_path = os.path.join(current_dir, "..", "data", "TC3-切换电压统计结果-v3.0-20260612-1.csv")
-    main_csv_path = os.path.normpath(main_csv_path)
+    # 切换电压 Excel 文件
+    main_excel_path = os.path.join(current_dir, "..", "data", "TC-切换电压.xlsx")
+    main_excel_path = os.path.normpath(main_excel_path)
 
-    summary_csv_path = os.path.join(current_dir, "..", "data", "TC3-切换电压_分组汇总_v3.0-20260612-1.csv")
-    summary_csv_path = os.path.normpath(summary_csv_path)
+    # 分组汇总也在同一个 Excel 文件中
+    summary_excel_path = main_excel_path
 
-    # Excel 文件路径（用于读取修改时间）
-    excel_path = os.path.join(current_dir, "..", "data", "TC-Raw data & Test Report.xlsx")
-    excel_path = os.path.normpath(excel_path)
-    sheet_name = "TC3-Raw data & Report"
+    # Raw Excel 文件路径（用于读取修改时间）
+    raw_excel_path = os.path.join(current_dir, "..", "data", "TC-Raw data & Test Report.xlsx")
+    raw_excel_path = os.path.normpath(raw_excel_path)
+    raw_sheet_name = "TC3-Raw data & Report"
 
     try:
-        if not os.path.exists(main_csv_path):
-            st.error(f"Main CSV file not found: {main_csv_path}")
-            st.info("Please update the CSV filenames in tc3_switch_voltage.py for TC3")
+        if not os.path.exists(main_excel_path):
+            st.error(f"Excel file not found: {main_excel_path}")
             return
 
         # 加载处理后的数据（使用缓存）
-        df = load_processed_data(main_csv_path, summary_csv_path, excel_path, sheet_name)
+        df = load_processed_data(main_excel_path, summary_excel_path, raw_excel_path, raw_sheet_name)
 
         # 全局样式
         st.markdown("""
@@ -204,18 +236,64 @@ def show():
             st.session_state.tc3_selected_voltages = []
         if 'tc3_selected_date_range' not in st.session_state:
             st.session_state.tc3_selected_date_range = ()
+        if 'tc3_previous_date_range' not in st.session_state:
+            st.session_state.tc3_previous_date_range = ()
 
-        # ========== 联动筛选器 ==========
-        col_filter1, col_filter2, col_filter3 = st.columns(3)
+        # ============================================================
+        # 日期放在最前面，选择后自动全选符合条件的 Project 和 Voltage（与 TC2 一致）
+        # ============================================================
+
+        # ========== 第一行：日期筛选（放在最前面） ==========
+        col_date = st.columns([1])[0]
+        with col_date:
+            if all_dates:
+                st.date_input(
+                    "📅 Sample Modified (Date Range)",
+                    key="tc3_selected_date_range",
+                    help="Select start and end date for Sample modification time"
+                )
+            else:
+                st.info("No dates available")
+
+        # 【关键】检测日期是否变化，如果变化则自动全选符合条件的 Project 和 Voltage
+        current_date_range = st.session_state.tc3_selected_date_range
+        previous_date_range = st.session_state.tc3_previous_date_range
+
+        if current_date_range != previous_date_range:
+            st.session_state.tc3_previous_date_range = current_date_range
+
+            if isinstance(current_date_range, tuple) and len(current_date_range) == 2:
+                # 有日期范围被选中
+                start_str = current_date_range[0].strftime('%Y-%m-%d')
+                end_str = current_date_range[1].strftime('%Y-%m-%d')
+
+                # 筛选符合日期范围的数据
+                date_filtered_df = df[
+                    (df['Sample Modified Date'] >= start_str) &
+                    (df['Sample Modified Date'] <= end_str)
+                    ]
+
+                # 自动全选所有符合条件的 Project
+                all_projects_in_date = sorted(date_filtered_df['Project Name'].dropna().unique().tolist())
+                st.session_state.tc3_selected_projects = all_projects_in_date
+
+                # 自动全选所有符合条件的 Voltage
+                all_voltages_in_date = sorted(date_filtered_df['Voltage Condition'].dropna().unique().tolist())
+                st.session_state.tc3_selected_voltages = all_voltages_in_date
+            else:
+                # 日期被清空，清空 Project 和 Voltage 的选择
+                st.session_state.tc3_selected_projects = []
+                st.session_state.tc3_selected_voltages = []
+
+        # ========== 第二行：Project Name 和 Voltage Condition ==========
+        col_filter1, col_filter2 = st.columns(2)
 
         with col_filter1:
-            # 根据已选的电压条件和日期范围，计算可用的项目选项
-            current_voltages = st.session_state.tc3_selected_voltages
+            # 根据已选的日期范围和电压条件，计算可用的项目选项
             current_date_range = st.session_state.tc3_selected_date_range
+            current_voltages = st.session_state.tc3_selected_voltages
 
             available_df = df.copy()
-            if current_voltages:
-                available_df = available_df[available_df['Voltage Condition'].isin(current_voltages)]
             if current_date_range and len(current_date_range) == 2:
                 start_str = current_date_range[0].strftime('%Y-%m-%d')
                 end_str = current_date_range[1].strftime('%Y-%m-%d')
@@ -223,6 +301,8 @@ def show():
                     (available_df['Sample Modified Date'] >= start_str) &
                     (available_df['Sample Modified Date'] <= end_str)
                     ]
+            if current_voltages:
+                available_df = available_df[available_df['Voltage Condition'].isin(current_voltages)]
 
             available_projects = sorted(available_df['Project Name'].dropna().unique().tolist())
 
@@ -237,10 +317,19 @@ def show():
             # 检测项目选择是否变化，如果变化则自动更新电压选择
             if set(selected_projects) != set(st.session_state.tc3_selected_projects):
                 if selected_projects:
-                    # 有项目被选中，自动全选这些项目对应的所有电压
+                    # 先基于日期筛选
+                    temp_df = df.copy()
+                    if current_date_range and len(current_date_range) == 2:
+                        start_str = current_date_range[0].strftime('%Y-%m-%d')
+                        end_str = current_date_range[1].strftime('%Y-%m-%d')
+                        temp_df = temp_df[
+                            (temp_df['Sample Modified Date'] >= start_str) &
+                            (temp_df['Sample Modified Date'] <= end_str)
+                            ]
+                    # 再找这些项目对应的电压
                     voltages_to_select = set()
                     for project in selected_projects:
-                        project_voltages = df[df['Project Name'] == project][
+                        project_voltages = temp_df[temp_df['Project Name'] == project][
                             'Voltage Condition'].dropna().unique().tolist()
                         voltages_to_select.update(project_voltages)
                     st.session_state.tc3_selected_voltages = sorted(list(voltages_to_select))
@@ -250,13 +339,11 @@ def show():
             st.session_state.tc3_selected_projects = selected_projects
 
         with col_filter2:
-            # 根据已选的项目和日期范围，计算可用的电压选项
-            current_projects = st.session_state.tc3_selected_projects
+            # 根据已选的日期范围和项目，计算可用的电压选项
             current_date_range = st.session_state.tc3_selected_date_range
+            current_projects = st.session_state.tc3_selected_projects
 
             available_df = df.copy()
-            if current_projects:
-                available_df = available_df[available_df['Project Name'].isin(current_projects)]
             if current_date_range and len(current_date_range) == 2:
                 start_str = current_date_range[0].strftime('%Y-%m-%d')
                 end_str = current_date_range[1].strftime('%Y-%m-%d')
@@ -264,6 +351,8 @@ def show():
                     (available_df['Sample Modified Date'] >= start_str) &
                     (available_df['Sample Modified Date'] <= end_str)
                     ]
+            if current_projects:
+                available_df = available_df[available_df['Project Name'].isin(current_projects)]
 
             available_voltages = sorted(available_df['Voltage Condition'].dropna().unique().tolist())
 
@@ -274,35 +363,19 @@ def show():
                 placeholder="Select voltage conditions..."
             )
 
-        with col_filter3:
-            if all_dates:
-                # 只使用 key，不设置 value 参数，避免与 session_state 冲突
-                st.date_input(
-                    "📅 Sample Modified",
-                    key="tc3_selected_date_range",
-                    help="Select start and end date for Sample modification time"
-                )
-            else:
-                st.info("No dates available")
-
         # ========== 只有用户主动选择了至少一项，才显示内容 ==========
-        # 修改：日期范围也算作筛选条件
         has_selection = (len(st.session_state.tc3_selected_projects) > 0 or
                          len(st.session_state.tc3_selected_voltages) > 0 or
                          (st.session_state.tc3_selected_date_range and len(
                              st.session_state.tc3_selected_date_range) == 2))
 
         if not has_selection:
-            st.info("👈 Please select at least one Project Name, Voltage Condition, or Date Range to display the chart.")
+            st.info("👈 Please select a date range or select Project Name / Voltage Condition to display the chart.")
             return
 
         # ========== 应用筛选 ==========
         filtered_df = df.copy()
 
-        if st.session_state.tc3_selected_projects:
-            filtered_df = filtered_df[filtered_df['Project Name'].isin(st.session_state.tc3_selected_projects)]
-        if st.session_state.tc3_selected_voltages:
-            filtered_df = filtered_df[filtered_df['Voltage Condition'].isin(st.session_state.tc3_selected_voltages)]
         if st.session_state.tc3_selected_date_range and len(st.session_state.tc3_selected_date_range) == 2:
             start_date, end_date = st.session_state.tc3_selected_date_range
             start_str = start_date.strftime('%Y-%m-%d')
@@ -311,6 +384,10 @@ def show():
                 (filtered_df['Sample Modified Date'] >= start_str) &
                 (filtered_df['Sample Modified Date'] <= end_str)
                 ]
+        if st.session_state.tc3_selected_projects:
+            filtered_df = filtered_df[filtered_df['Project Name'].isin(st.session_state.tc3_selected_projects)]
+        if st.session_state.tc3_selected_voltages:
+            filtered_df = filtered_df[filtered_df['Voltage Condition'].isin(st.session_state.tc3_selected_voltages)]
 
         if len(filtered_df) == 0:
             st.warning("No data available. Please adjust your filters.")
@@ -327,21 +404,39 @@ def show():
         pos_x, pos_y = compute_kde_curve(positive_values, n_points=100)
         neg_x, neg_y = compute_kde_curve(negative_values, n_points=100)
 
+        # ========== 计算X轴范围（对齐到0.1V的倍数） ==========
+        all_values = positive_values + negative_values
+        bin_width = 0.1  # 柱子宽度 0.1V
+        if all_values:
+            x_min_data = min(all_values)
+            x_max_data = max(all_values)
+            padding = 0.4
+            x_min = np.floor((x_min_data - padding) / bin_width) * bin_width
+            x_max = np.ceil((x_max_data + padding) / bin_width) * bin_width
+        else:
+            x_min, x_max = -2, 2
+
         # ========== 创建图表 ==========
         fig = go.Figure()
 
-        # 正电压：直方图 + KDE曲线
+        # ========== 正电压：使用 Bar 图（精确控制 hover） ==========
         if positive_values:
-            fig.add_trace(go.Histogram(
-                x=positive_values,
-                name='Positive Switch',
-                marker_color='#2E86AB',
-                opacity=0.6,
-                histnorm='probability density',
-                nbinsx=20,
-                legendgroup='Positive',
-                showlegend=True
-            ))
+            # 计算直方图数据
+            bin_centers, hist_density, bin_labels = compute_histogram_data(
+                positive_values, bin_width, x_min, x_max
+            )
+
+            if bin_centers:
+                fig.add_trace(go.Bar(
+                    x=bin_centers,
+                    y=hist_density,
+                    name='Positive Switch',
+                    marker_color='#2E86AB',
+                    opacity=0.6,
+                    width=bin_width * 0.9,
+                    hovertemplate='<b>%{customdata}</b><br>Density: %{y:.3f}<extra></extra>',
+                    customdata=bin_labels
+                ))
 
             if pos_x is not None:
                 fig.add_trace(go.Scatter(
@@ -367,18 +462,24 @@ def show():
                     annotation_font_color="#2E86AB"
                 )
 
-        # 负电压：直方图 + KDE曲线
+        # ========== 负电压：使用 Bar 图（精确控制 hover） ==========
         if negative_values:
-            fig.add_trace(go.Histogram(
-                x=negative_values,
-                name='Negative Switch',
-                marker_color='#A23B72',
-                opacity=0.6,
-                histnorm='probability density',
-                nbinsx=20,
-                legendgroup='Negative',
-                showlegend=True
-            ))
+            # 计算直方图数据
+            bin_centers, hist_density, bin_labels = compute_histogram_data(
+                negative_values, bin_width, x_min, x_max
+            )
+
+            if bin_centers:
+                fig.add_trace(go.Bar(
+                    x=bin_centers,
+                    y=hist_density,
+                    name='Negative Switch',
+                    marker_color='#A23B72',
+                    opacity=0.6,
+                    width=bin_width * 0.9,
+                    hovertemplate='<b>%{customdata}</b><br>Density: %{y:.3f}<extra></extra>',
+                    customdata=bin_labels
+                ))
 
             if neg_x is not None:
                 fig.add_trace(go.Scatter(
@@ -406,21 +507,15 @@ def show():
 
         fig.add_vline(x=0, line_width=1.5, line_dash="dash", line_color="gray", opacity=0.5)
 
-        # ========== 【修改1】X轴间隔改为0.5V ==========
-        # 计算合理的x轴范围
-        all_values = positive_values + negative_values
-        if all_values:
-            x_min = min(all_values)
-            x_max = max(all_values)
-            # 扩展一点范围
-            padding = 0.5
-            x_min = np.floor((x_min - padding) / 0.5) * 0.5
-            x_max = np.ceil((x_max + padding) / 0.5) * 0.5
-            tick_values = np.arange(x_min, x_max + 0.5, 0.5)
-            tick_text = [f"{v:.1f}" for v in tick_values]
-        else:
-            tick_values = None
-            tick_text = None
+        # ========== 生成X轴刻度：0.1V间隔，只显示0.5V倍数的标签 ==========
+        tick_values = np.arange(x_min, x_max + 0.01, bin_width)
+        tick_text = []
+        for v in tick_values:
+            remainder = round(v / 0.5, 6)
+            if remainder.is_integer():
+                tick_text.append(f"{v:.1f}")
+            else:
+                tick_text.append("")
 
         fig.update_layout(
             title='Switch Voltage Distribution with KDE Fit',
@@ -434,11 +529,11 @@ def show():
                 zeroline=True,
                 zerolinewidth=1,
                 zerolinecolor='lightgray',
-                tickmode='array' if tick_values is not None else None,
+                tickmode='array',
                 tickvals=tick_values,
                 ticktext=tick_text,
                 tickformat='.1f',
-                dtick=0.5
+                range=[x_min, x_max]
             ),
             yaxis=dict(gridcolor='lightgray', zeroline=True, zerolinewidth=1)
         )
@@ -506,7 +601,7 @@ def show():
             st.session_state.tc3_selected_points = []
 
         # ============================================================
-        # 【修改2】图表占满整行，File Details 移到图表下方
+        # 图表占满整行，File Details 移到图表下方
         # ============================================================
 
         # ========== 显示图表（占满整行） ==========
@@ -635,4 +730,6 @@ def show():
 
     except Exception as e:
         st.error(f"Error: {str(e)}")
-        st.info("Please check data format in CSV files")
+        import traceback
+        st.code(traceback.format_exc())
+        st.info("Please check data format in Excel files")

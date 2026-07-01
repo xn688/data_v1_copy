@@ -6,27 +6,37 @@ import re
 
 
 def show():
-    # 读取 CSV
+    # 读取 Excel
     current_dir = os.path.dirname(os.path.abspath(__file__))
-    csv_path = os.path.join(current_dir, "..", "data", "TC3-器件状态统计汇总_v3.0_20260612-1.csv")
-    csv_path = os.path.normpath(csv_path)
+    excel_path = os.path.join(current_dir, "..", "data", "TC-器件状态.xlsx")
+    excel_path = os.path.normpath(excel_path)
+    sheet_name = "TC3-器件状态-统计汇总"
 
     # Excel 文件路径（用于读取修改时间）
-    excel_path = os.path.join(current_dir, "..", "data", "TC-Raw data & Test Report.xlsx")
-    excel_path = os.path.normpath(excel_path)
-    sheet_name = "TC3-Raw data & Report"
+    raw_excel_path = os.path.join(current_dir, "..", "data", "TC-Raw data & Test Report.xlsx")
+    raw_excel_path = os.path.normpath(raw_excel_path)
+    raw_sheet_name = "TC3-Raw data & Report"
 
     try:
-        if not os.path.exists(csv_path):
-            st.error(f"CSV file not found: {csv_path}")
-            st.info("Please update the CSV filename in tc3_device_status.py for TC3")
+        if not os.path.exists(excel_path):
+            st.error(f"Excel file not found: {excel_path}")
             return
 
-        # 读取 CSV
-        df = pd.read_csv(csv_path, encoding='utf-8')
-        df.columns = df.columns.str.strip().str.replace('\ufeff', '')
+        # 读取 Excel
+        excel_file = pd.ExcelFile(excel_path)
+        available_sheets = excel_file.sheet_names
 
-        # 重命名列
+        if sheet_name not in available_sheets:
+            st.error(f"Sheet '{sheet_name}' not found in the Excel file")
+            st.info(f"Available sheets: {', '.join(available_sheets)}")
+            return
+
+        df = pd.read_excel(excel_path, sheet_name=sheet_name)
+
+        # 去除列名中的空格和BOM
+        df.columns = df.columns.str.strip()
+
+        # 重命名列（根据实际Excel中的列名调整）
         rename_map = {
             '项目名': 'Sample',
             '项目标记': 'Status Flag',
@@ -58,38 +68,37 @@ def show():
             if col in df.columns:
                 df[col] = df[col].astype(str).str.replace('%', '').astype(float)
 
-        # ========== 从 Excel 读取修改时间 ==========
+        # ========== 从 Raw Excel 读取修改时间 ==========
         sample_modified_map = {}
-        if os.path.exists(excel_path):
+        if os.path.exists(raw_excel_path):
             try:
-                excel_file = pd.ExcelFile(excel_path)
-                if sheet_name in excel_file.sheet_names:
-                    excel_df = pd.read_excel(excel_path, sheet_name=sheet_name)
+                raw_excel_file = pd.ExcelFile(raw_excel_path)
+                if raw_sheet_name in raw_excel_file.sheet_names:
+                    raw_df = pd.read_excel(raw_excel_path, sheet_name=raw_sheet_name)
 
                     # 识别 Name 列和时间列
                     name_col = None
                     for col in ['Name', '名称', 'Sample', '样品名称', 'Sample Name']:
-                        if col in excel_df.columns:
+                        if col in raw_df.columns:
                             name_col = col
                             break
                     if name_col is None:
-                        name_col = excel_df.columns[0]
+                        name_col = raw_df.columns[0]
 
                     # 识别 Raw修改时间 列
                     time_col = None
                     for col in ['Raw修改时间', 'Raw Modified Time', '原始修改时间', 'Raw Time']:
-                        if col in excel_df.columns:
+                        if col in raw_df.columns:
                             time_col = col
                             break
 
                     if time_col:
                         # 解析时间并提取日期
-                        for _, row in excel_df.iterrows():
-                            excel_sample_name = str(row[name_col]) if pd.notna(row[name_col]) else ""
-                            if excel_sample_name and excel_sample_name != 'nan':
+                        for _, row in raw_df.iterrows():
+                            sample_name = str(row[name_col]) if pd.notna(row[name_col]) else ""
+                            if sample_name and sample_name != 'nan':
                                 # 去除下划线及后面的日期后缀（如 _20260401）
-                                # 匹配 _ 后面跟着 8 位数字（日期）的模式
-                                clean_name = re.sub(r'_\d{8}$', '', excel_sample_name)
+                                clean_name = re.sub(r'_\d{8}$', '', sample_name)
 
                                 time_val = row[time_col] if pd.notna(row[time_col]) else None
                                 if time_val:
@@ -109,7 +118,7 @@ def show():
                                                 dt = pd.to_datetime(time_str)
                                                 date_str = dt.strftime('%Y-%m-%d')
                                         # 存储时同时用原始名称和清理后的名称作为 key
-                                        sample_modified_map[excel_sample_name] = date_str
+                                        sample_modified_map[sample_name] = date_str
                                         sample_modified_map[clean_name] = date_str
                                     except:
                                         pass
@@ -272,4 +281,6 @@ def show():
 
     except Exception as e:
         st.error(f"Error: {str(e)}")
-        st.info("Please ensure the CSV file has required columns: 项目名, 项目标记, 总器件数")
+        import traceback
+        st.code(traceback.format_exc())
+        st.info("Please ensure the Excel file has required columns: 项目名, 项目标记, 总器件数")
