@@ -10,22 +10,22 @@ import re
 
 # ========== 缓存：数据加载和处理 ==========
 @st.cache_data
-def load_processed_data(main_csv_path, summary_csv_path, excel_path, sheet_name):
+def load_processed_data(main_excel_path, summary_excel_path, raw_excel_path, sheet_name):
     """加载并处理原始数据，缓存结果"""
 
-    # 读取主数据
-    df = pd.read_csv(main_csv_path, encoding='utf-8')
-    df.columns = df.columns.str.strip().str.replace('\ufeff', '')
+    # 读取主数据（从 Excel）
+    df = pd.read_excel(main_excel_path, sheet_name="TC2-切换电压-总结果")
+    df.columns = df.columns.str.strip()
 
-    # 读取分组汇总数据
+    # 读取分组汇总数据（从 Excel）
     n_median_map = {}
     p_median_map = {}
     n_avg_map = {}
     p_avg_map = {}
 
-    if os.path.exists(summary_csv_path):
-        df_summary = pd.read_csv(summary_csv_path, encoding='utf-8')
-        df_summary.columns = df_summary.columns.str.strip().str.replace('\ufeff', '')
+    try:
+        df_summary = pd.read_excel(summary_excel_path, sheet_name="TC2-切换电压-分组汇总")
+        df_summary.columns = df_summary.columns.str.strip()
         df_summary = df_summary.rename(columns={
             '所属项目': 'Project Name',
             '电压条件': 'Voltage Condition',
@@ -40,6 +40,8 @@ def load_processed_data(main_csv_path, summary_csv_path, excel_path, sheet_name)
             p_median_map[key] = row.get('P-switch Median (V)', 'N/A')
             n_avg_map[key] = row.get('N-switch Average (V)', 'N/A')
             p_avg_map[key] = row.get('P-switch Average (V)', 'N/A')
+    except Exception as e:
+        st.warning(f"Could not read summary data: {e}")
 
     # 重命名主数据的列
     df = df.rename(columns={
@@ -60,13 +62,13 @@ def load_processed_data(main_csv_path, summary_csv_path, excel_path, sheet_name)
     # 删除临时列
     df = df.drop(columns=['Match Key'])
 
-    # ========== 从 Excel 读取修改时间 ==========
+    # ========== 从 Raw Excel 读取修改时间 ==========
     sample_modified_map = {}
-    if os.path.exists(excel_path):
+    if os.path.exists(raw_excel_path):
         try:
-            excel_file = pd.ExcelFile(excel_path)
+            excel_file = pd.ExcelFile(raw_excel_path)
             if sheet_name in excel_file.sheet_names:
-                excel_df = pd.read_excel(excel_path, sheet_name=sheet_name)
+                excel_df = pd.read_excel(raw_excel_path, sheet_name=sheet_name)
 
                 # 识别 Name 列和时间列
                 name_col = None
@@ -132,27 +134,57 @@ def compute_kde_curve(values, n_points=100):
     return x, y
 
 
+# ========== 计算直方图数据（用于 Bar 图） ==========
+@st.cache_data
+def compute_histogram_data(values, bin_width, x_min, x_max):
+    """计算直方图数据，返回 bin 中心、密度和区间标签"""
+    if not values:
+        return [], [], []
+
+    # 计算 bin 边界
+    bins = np.arange(x_min, x_max + bin_width, bin_width)
+
+    # 计算直方图
+    hist_counts, bin_edges = np.histogram(values, bins=bins)
+
+    # 计算密度（归一化）
+    total_count = len(values)
+    hist_density = hist_counts / (total_count * bin_width)
+
+    # 构建区间标签
+    bin_labels = []
+    bin_centers = []
+    for i in range(len(bin_edges) - 1):
+        start = bin_edges[i]
+        end = bin_edges[i + 1]
+        bin_labels.append(f"{start:.1f} ~ {end:.1f} V")
+        bin_centers.append((start + end) / 2)
+
+    return bin_centers, hist_density, bin_labels
+
+
 def show():
     current_dir = os.path.dirname(os.path.abspath(__file__))
 
-    main_csv_path = os.path.join(current_dir, "..", "data", "TC2-切换电压统计结果-v2.3-20260612-1.csv")
-    main_csv_path = os.path.normpath(main_csv_path)
+    # 切换电压 Excel 文件
+    main_excel_path = os.path.join(current_dir, "..", "data", "TC-切换电压.xlsx")
+    main_excel_path = os.path.normpath(main_excel_path)
 
-    summary_csv_path = os.path.join(current_dir, "..", "data", "TC2-切换电压_分组汇总_v2.3-20260612-1.csv")
-    summary_csv_path = os.path.normpath(summary_csv_path)
+    # 分组汇总也在同一个 Excel 文件中
+    summary_excel_path = main_excel_path
 
-    # Excel 文件路径（用于读取修改时间）
-    excel_path = os.path.join(current_dir, "..", "data", "TC-Raw data & Test Report.xlsx")
-    excel_path = os.path.normpath(excel_path)
-    sheet_name = "TC2-Raw data & Report"
+    # Raw Excel 文件路径（用于读取修改时间）
+    raw_excel_path = os.path.join(current_dir, "..", "data", "TC-Raw data & Test Report.xlsx")
+    raw_excel_path = os.path.normpath(raw_excel_path)
+    raw_sheet_name = "TC2-Raw data & Report"
 
     try:
-        if not os.path.exists(main_csv_path):
-            st.error(f"Main CSV file not found: {main_csv_path}")
+        if not os.path.exists(main_excel_path):
+            st.error(f"Excel file not found: {main_excel_path}")
             return
 
         # 加载处理后的数据（使用缓存）
-        df = load_processed_data(main_csv_path, summary_csv_path, excel_path, sheet_name)
+        df = load_processed_data(main_excel_path, summary_excel_path, raw_excel_path, raw_sheet_name)
 
         # 全局样式
         st.markdown("""
@@ -369,21 +401,39 @@ def show():
         pos_x, pos_y = compute_kde_curve(positive_values, n_points=100)
         neg_x, neg_y = compute_kde_curve(negative_values, n_points=100)
 
+        # ========== 计算X轴范围（对齐到0.1V的倍数） ==========
+        all_values = positive_values + negative_values
+        bin_width = 0.1  # 柱子宽度 0.1V
+        if all_values:
+            x_min_data = min(all_values)
+            x_max_data = max(all_values)
+            padding = 0.4
+            x_min = np.floor((x_min_data - padding) / bin_width) * bin_width
+            x_max = np.ceil((x_max_data + padding) / bin_width) * bin_width
+        else:
+            x_min, x_max = -2, 2
+
         # ========== 创建图表 ==========
         fig = go.Figure()
 
-        # 正电压：直方图 + KDE曲线
+        # ========== 正电压：使用 Bar 图（精确控制 hover） ==========
         if positive_values:
-            fig.add_trace(go.Histogram(
-                x=positive_values,
-                name='Positive Switch',
-                marker_color='#2E86AB',
-                opacity=0.6,
-                histnorm='probability density',
-                nbinsx=20,
-                legendgroup='Positive',
-                showlegend=True
-            ))
+            # 计算直方图数据
+            bin_centers, hist_density, bin_labels = compute_histogram_data(
+                positive_values, bin_width, x_min, x_max
+            )
+
+            if bin_centers:
+                fig.add_trace(go.Bar(
+                    x=bin_centers,
+                    y=hist_density,
+                    name='Positive Switch',
+                    marker_color='#2E86AB',
+                    opacity=0.6,
+                    width=bin_width * 0.9,  # 柱子宽度稍微缩小一点，便于观察
+                    hovertemplate='<b>%{customdata}</b><br>Density: %{y:.3f}<extra></extra>',
+                    customdata=bin_labels
+                ))
 
             if pos_x is not None:
                 fig.add_trace(go.Scatter(
@@ -409,18 +459,24 @@ def show():
                     annotation_font_color="#2E86AB"
                 )
 
-        # 负电压：直方图 + KDE曲线
+        # ========== 负电压：使用 Bar 图（精确控制 hover） ==========
         if negative_values:
-            fig.add_trace(go.Histogram(
-                x=negative_values,
-                name='Negative Switch',
-                marker_color='#A23B72',
-                opacity=0.6,
-                histnorm='probability density',
-                nbinsx=20,
-                legendgroup='Negative',
-                showlegend=True
-            ))
+            # 计算直方图数据
+            bin_centers, hist_density, bin_labels = compute_histogram_data(
+                negative_values, bin_width, x_min, x_max
+            )
+
+            if bin_centers:
+                fig.add_trace(go.Bar(
+                    x=bin_centers,
+                    y=hist_density,
+                    name='Negative Switch',
+                    marker_color='#A23B72',
+                    opacity=0.6,
+                    width=bin_width * 0.9,  # 柱子宽度稍微缩小一点，便于观察
+                    hovertemplate='<b>%{customdata}</b><br>Density: %{y:.3f}<extra></extra>',
+                    customdata=bin_labels
+                ))
 
             if neg_x is not None:
                 fig.add_trace(go.Scatter(
@@ -448,19 +504,15 @@ def show():
 
         fig.add_vline(x=0, line_width=1.5, line_dash="dash", line_color="gray", opacity=0.5)
 
-        # ========== X轴间隔改为0.5V ==========
-        all_values = positive_values + negative_values
-        if all_values:
-            x_min = min(all_values)
-            x_max = max(all_values)
-            padding = 0.5
-            x_min = np.floor((x_min - padding) / 0.5) * 0.5
-            x_max = np.ceil((x_max + padding) / 0.5) * 0.5
-            tick_values = np.arange(x_min, x_max + 0.5, 0.5)
-            tick_text = [f"{v:.1f}" for v in tick_values]
-        else:
-            tick_values = None
-            tick_text = None
+        # ========== 生成X轴刻度：0.1V间隔，只显示0.5V倍数的标签 ==========
+        tick_values = np.arange(x_min, x_max + 0.01, bin_width)
+        tick_text = []
+        for v in tick_values:
+            remainder = round(v / 0.5, 6)
+            if remainder.is_integer():
+                tick_text.append(f"{v:.1f}")
+            else:
+                tick_text.append("")
 
         fig.update_layout(
             title='Switch Voltage Distribution with KDE Fit',
@@ -474,11 +526,11 @@ def show():
                 zeroline=True,
                 zerolinewidth=1,
                 zerolinecolor='lightgray',
-                tickmode='array' if tick_values is not None else None,
+                tickmode='array',
                 tickvals=tick_values,
                 ticktext=tick_text,
                 tickformat='.1f',
-                dtick=0.5
+                range=[x_min, x_max]
             ),
             yaxis=dict(gridcolor='lightgray', zeroline=True, zerolinewidth=1)
         )
@@ -675,4 +727,6 @@ def show():
 
     except Exception as e:
         st.error(f"Error: {str(e)}")
-        st.info("Please check data format in CSV files")
+        import traceback
+        st.code(traceback.format_exc())
+        st.info("Please check data format in Excel files")
